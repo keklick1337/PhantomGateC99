@@ -2,7 +2,7 @@
 # Dockerfile (Debian-based) for cross-compiling PhantomGate
 # for multiple Linux architectures (x86_64, ARMv7, AArch64, MIPS, riscv64), statically.
 # ---------------------------------------------------
-FROM debian:bookworm AS cross-builder
+FROM debian:bookworm AS phantomgate-build-cross
 
 ENV DEBIAN_FRONTEND=noninteractive
 

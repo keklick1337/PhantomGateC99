@@ -2,11 +2,11 @@
 # Dockerfile (Debian-based) for i386 compiling PhantomGate
 # for i386 Linux architecture.
 # ---------------------------------------------------
-FROM debian:bookworm AS i386-builder
+FROM debian:bookworm AS phantomgate-build-i386
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
     build-essential make file pkg-config \
     gcc-multilib \
     && rm -rf /var/lib/apt/lists/*

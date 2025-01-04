@@ -1,0 +1,19 @@
+# ---------------------------------------------------
+# Dockerfile (Debian-based) for i386 compiling PhantomGate
+# for i386 Linux architecture.
+# ---------------------------------------------------
+FROM debian:bookworm AS i386-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential make file pkg-config \
+    gcc-multilib \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY build_i386.sh /build_i386.sh
+RUN chmod +x /build_i386.sh
+
+CMD ["/build_i386.sh"]

@@ -42,6 +42,7 @@ sudo iptables -t nat -A PREROUTING -i $INTERFACE -p tcp -m tcp \
   -m multiport --dports 1:65535 -j REDIRECT --to-ports 8888
 ```
 Then **PhantomGate** will effectively spoof any connection attempt on your machine.
+For more examples you can check [Iptables Examples](examples)
 
 ## Signature File
 - **Raw** lines: no parentheses or square brackets; can include `\n`, `\r`, `\xNN`.

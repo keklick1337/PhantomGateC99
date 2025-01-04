@@ -27,7 +27,7 @@
 #include <sys/stat.h>
 #include <signal.h>
 
-#define PHANTOMGATE_VERSION "0.1.0"
+#define PHANTOMGATE_VERSION "0.1.1"
 #define DEFAULT_SIGNATURES_FILE "signatures.txt"
 #define DEFAULT_LISTEN_ADDR "127.0.0.1:8888"
 #define BUFFER_SIZE 4096
@@ -273,6 +273,21 @@ static void auto_fix_regex(char *str) {
     }
 }
 
+static bool looks_like_regex(const char *line)
+{
+    // This is just a simplistic heuristic:
+    // If the line contains certain patterns like "\d", "\w", "(", "[", etc.,
+    // we treat it as a naive regex.
+    // Feel free to adjust this check as needed.
+    if (strstr(line, "\\d") || strstr(line, "\\w") || strstr(line, "\\.") ||
+        strchr(line, '(')   || strchr(line, '[')   ||
+        strstr(line, "\\x")) 
+    {
+        return true;
+    }
+    return false;
+}
+
 /*
  * parse_signatures() now tries to auto-fix invalid parentheses or brackets in regex lines
  * instead of just ignoring them or crashing.
@@ -292,7 +307,7 @@ static Signature *parse_signatures(const char *file_path, int *out_count) {
 
     size_t capacity = 32;
     size_t size = 0;
-    Signature *sigs = (Signature *)malloc(capacity * sizeof(Signature));
+    Signature *sigs = malloc(capacity * sizeof(Signature));
     if (!sigs) {
         fclose(fp);
         return NULL;
@@ -316,16 +331,17 @@ static Signature *parse_signatures(const char *file_path, int *out_count) {
         *end = '\0';
 
         if (strlen(start) == 0) {
-            continue;
+            continue; // skip empty lines
         }
 
+        // Increase array if needed
         if (size >= capacity) {
             capacity *= 2;
             Signature *temp = realloc(sigs, capacity * sizeof(Signature));
             if (!temp) {
                 free(sigs);
                 fclose(fp);
-                phantom_log(LOG_LEVEL_ERROR, "Memory allocation error while reading signatures.");
+                phantom_log(LOG_LEVEL_ERROR, "Memory allocation error reading signatures.");
                 return NULL;
             }
             sigs = temp;
@@ -333,27 +349,16 @@ static Signature *parse_signatures(const char *file_path, int *out_count) {
 
         sigs[size].data = NULL;
 
-        /*
-         * If there's a '(' or '[' in the string, we'll consider it a "regex-like" signature,
-         * even though it's not truly a full regex. We'll store it as SIGTYPE_REGEX,
-         * and then auto-fix unmatched parentheses/brackets.
-         */
-        bool is_regex_candidate = (strchr(start, '(') != NULL) || (strchr(start, '[') != NULL);
-
-        if (is_regex_candidate) {
+        if (looks_like_regex(start)) {
             sigs[size].type = SIGTYPE_REGEX;
             sigs[size].data = c99_strdup(start);
-            if (!sigs[size].data) {
-                phantom_log(LOG_LEVEL_WARNING, "Line %d: c99_strdup failed.", line_num);
-                continue;
-            }
-            // Auto-fix parentheses/brackets
             auto_fix_regex(sigs[size].data);
         } else {
             sigs[size].type = SIGTYPE_RAW;
             sigs[size].data = unescape_string(start);
             if (!sigs[size].data) {
-                phantom_log(LOG_LEVEL_WARNING, "Line %d: unescape_string() failed.", line_num);
+                phantom_log(LOG_LEVEL_WARNING, 
+                            "Line %d: unescape_string() failed. Skipping...", line_num);
                 continue;
             }
         }
@@ -476,24 +481,254 @@ static char *generate_payload(Signature *sig) {
 }
 
 /*
- * generate_regex_match: naive "regex-like" expansion.
- * We've added auto-fix for unmatched parentheses/brackets at parse time,
- * so here we just do expansions and not worry about catastrophic mismatches.
+ * Category of the last token we expanded, so that when we see '+' or '*',
+ * we know *what* to generate more of.
  */
-static char *generate_regex_match(const char *regex_str) {
-    if (!regex_str) return NULL;
+typedef enum {
+    CAT_NONE = 0,
+    CAT_DIGIT,      /* \d => digits [0-9] */
+    CAT_WCHAR,      /* \w => [A-Za-z0-9_] */
+    CAT_BRACKET,    /* [abc] => from that bracket set */
+    CAT_PRINTABLE,  /* '.' => random ASCII 0x21..0x7E */
+    CAT_LITERAL     /* a single literal char (e.g. \., or normal text) */
+} Category;
+
+static inline char pick_random_digit(void) {
+    /* random digit [0..9] */
+    return (char)('0' + (rand() % 10));
+}
+
+static inline char pick_random_wchar(void) {
+    /* random from [A-Za-z0-9_] => 26 + 26 + 10 + 1 = 63 total */
+    int r = rand() % 63;
+    if (r < 26) {
+        return (char)('a' + r);
+    }
+    r -= 26;
+    if (r < 26) {
+        return (char)('A' + r);
+    }
+    r -= 26;
+    if (r < 10) {
+        return (char)('0' + r);
+    }
+    return '_';
+}
+
+static inline char pick_random_printable(void) {
+    /* random printable ASCII [0x21..0x7E] */
+    int rnd = 33 + (rand() % (126 - 33 + 1));
+    return (char)rnd;
+}
+
+/*
+ * Expand bracket content from something like "\w._-" into all actual characters:
+ *  - \w => [A-Za-z0-9_]
+ *  - \d => [0-9]
+ *  - \. => literal '.'
+ *  - \xNN => literal char with hex code NN (optional if you want)
+ *  - anything else after '\' => that literal char
+ *
+ * For example:
+ *   "\w._-" => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+ *
+ * Returns the number of characters in 'dst', or -1 if an error occurred.
+ */
+static int expand_bracket_expression(const char *src, size_t srclen, char *dst, size_t dstsize)
+{
+    size_t di = 0;  /* index for writing into dst */
+    for (size_t i = 0; i < srclen; i++) {
+        if (di + 64 >= dstsize) {
+            // make sure we won't overflow if we add many characters
+            return -1; 
+        }
+
+        char c = src[i];
+        if (c == '\\' && (i + 1 < srclen)) {
+            char nxt = src[i + 1];
+            switch (nxt) {
+                case 'w': {
+                    // expand \w => A-Za-z0-9_
+                    const char *word_chars = 
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
+                    size_t wc_len = strlen(word_chars);
+                    if (di + wc_len >= dstsize) return -1;
+                    memcpy(&dst[di], word_chars, wc_len);
+                    di += wc_len;
+                    i++;
+                    break;
+                }
+                case 'd': {
+                    // expand \d => 0-9
+                    const char *digits = "0123456789";
+                    size_t dg_len = strlen(digits);
+                    if (di + dg_len >= dstsize) return -1;
+                    memcpy(&dst[di], digits, dg_len);
+                    di += dg_len;
+                    i++;
+                    break;
+                }
+                case '.': {
+                    // expand \. => literal '.'
+                    dst[di++] = '.';
+                    i++;
+                    break;
+                }
+                // you can add more expansions if desired:
+                // case 's': => maybe spaces, etc.
+                default: {
+                    // if it's something like \xNN or \- etc.
+                    // For simplicity, we just output nxt literally,
+                    // or you can parse \xNN. 
+                    // Example partial approach:
+                    if (nxt == 'x' && (i + 3 < srclen)) {
+                        // parse two hex digits
+                        char hx[3];
+                        hx[0] = src[i + 2];
+                        hx[1] = src[i + 3];
+                        hx[2] = '\0';
+                        unsigned int val;
+                        if (sscanf(hx, "%x", &val) == 1) {
+                            dst[di++] = (char)val;
+                            i += 3;
+                        } else {
+                            // fallback, just output 'x'
+                            dst[di++] = 'x';
+                            i++;
+                        }
+                    } else {
+                        // just output nxt as literal
+                        dst[di++] = nxt;
+                        i++;
+                    }
+                    break;
+                }
+            }
+        } else {
+            // normal character => copy to dst
+            dst[di++] = c;
+        }
+    }
+
+    dst[di] = '\0';
+    return (int)di; // number of chars stored
+}
+
+
+/*
+ * pick_random_bracket: picks one random char from bracket_buf (which has
+ * already been "expanded"). We try to avoid repeating last_char, but if
+ * there's only 1 or 2 characters, we might fail quickly.
+ */
+static char pick_random_bracket(const char *bracket_buf, int bracket_len, char last_char)
+{
+    if (bracket_len <= 0) return '?';
+    for (int tries = 0; tries < 10; tries++) {
+        int pick = rand() % bracket_len;
+        char c = bracket_buf[pick];
+        if (c != last_char) {
+            return c;
+        }
+    }
+    // fallback
+    return bracket_buf[0];
+}
+
+/*
+ * Given a "category," pick a random char from that category,
+ * avoiding last_char if possible.
+ */
+static char pick_from_category(Category cat,
+                               const char *bracket_buf, int bracket_len,
+                               char last_char)
+{
+    for (int tries = 0; tries < 10; tries++) {
+        char c;
+        switch (cat) {
+            case CAT_DIGIT:
+                c = pick_random_digit();
+                break;
+            case CAT_WCHAR:
+                c = pick_random_wchar();
+                break;
+            case CAT_BRACKET:
+                /* bracket_buf may have length bracket_len */
+                if (bracket_len <= 0) {
+                    c = '?'; /* fallback if bracket is empty */
+                } else {
+                    c = pick_random_bracket(bracket_buf, bracket_len, last_char);
+                }
+                break;
+            case CAT_PRINTABLE:
+                c = pick_random_printable();
+                break;
+            case CAT_LITERAL:
+            default:
+                /* If we get here, we do some random printable fallback. */
+                c = pick_random_printable();
+                break;
+        }
+
+        if (c != last_char) {
+            return c;
+        }
+    }
+
+    /* fallback if we can't avoid duplication after many tries */
+    return pick_random_printable();
+}
+
+/*
+ * generate_regex_match: naive "regex-like" expansion that tries to avoid
+ * consecutive identical characters and produce random expansions for + or *.
+ *
+ * - \. => literal dot (Category = CAT_LITERAL)
+ * - \d => random digit [0..9] (Category = CAT_DIGIT)
+ * - \w => random from [A-Za-z0-9_] (Category = CAT_WCHAR)
+ * - \r => 0x0D
+ * - \n => 0x0A
+ * - \t => 0x09
+ * - \0 => 0x00
+ * - \xNN => parse two hex digits
+ * - [abc] => pick one random char from 'abc' (Category = CAT_BRACKET)
+ * - + => produce 1..6 new chars from the last category
+ * - * => produce 0..5 new chars from the last category
+ * - . => random printable ASCII (Category = CAT_PRINTABLE)
+ * - everything else => literal char (Category = CAT_LITERAL)
+ *
+ * Only call srand() once in your main(), not in this function.
+ */
+char *generate_regex_match(const char *regex_str)
+{
+    if (!regex_str) {
+        return NULL;
+    }
     size_t len = strlen(regex_str);
 
-    size_t capacity = len * 4 + 1;
-    if (capacity < 64) capacity = 64;
-    char *result = (char *)malloc(capacity);
-    if (!result) return NULL;
+    /* A rough capacity guess to allow expansions. */
+    size_t capacity = len * 6 + 1;
+    if (capacity < 64) {
+        capacity = 64;
+    }
 
-    size_t ri = 0;
+    char *result = (char *)malloc(capacity);
+    if (!result) {
+        return NULL;
+    }
+
+    size_t ri = 0; /* write index into result */
+    char last_char = '\0'; /* track the last character we wrote */
+    Category last_cat = CAT_NONE;
+    char last_bracket_buf[256];
+    int last_bracket_len = 0;
+
+    memset(last_bracket_buf, 0, sizeof(last_bracket_buf));
+
     for (size_t i = 0; i < len; i++) {
-        if (ri + 8 >= capacity) {
+        /* expand the buffer if near capacity */
+        if (ri + 16 >= capacity) {
             capacity *= 2;
-            char *temp = realloc(result, capacity);
+            char *temp = (char *)realloc(result, capacity);
             if (!temp) {
                 free(result);
                 return NULL;
@@ -502,100 +737,214 @@ static char *generate_regex_match(const char *regex_str) {
         }
 
         char c = regex_str[i];
+
+        /* check for backslash escapes */
         if (c == '\\' && (i + 1 < len)) {
             char nxt = regex_str[i + 1];
-            if (nxt == 'd') {
-                int dig = rand() % 10;
-                result[ri++] = (char)('0' + dig);
-                i++;
-            } else if (nxt == 'w') {
-                char letter = (char)('a' + (rand() % 26));
-                result[ri++] = letter;
-                i++;
-            } else if (nxt == 'x' && (i + 3 < len)) {
-                char hex_part[3] = { regex_str[i + 2], regex_str[i + 3], '\0' };
-                unsigned int val = 0;
-                if (sscanf(hex_part, "%x", &val) == 1) {
-                    result[ri++] = (char)val;
-                    i += 3;
-                } else {
-                    // invalid hex
-                    result[ri++] = '\\';
-                    result[ri++] = 'x';
-                    i++;
-                }
-            } else {
-                result[ri++] = nxt;
-                i++;
-            }
-        } else if (c == '[') {
-            /*
-             * We assume auto_fix_regex handled unmatched brackets, so we expect a matching ']'.
-             */
-            size_t j = i + 1;
-            char char_class[256];
-            int cc_len = 0;
-            memset(char_class, 0, sizeof(char_class));
+            Category cat = CAT_LITERAL; /* assume literal unless recognized */
 
-            while (j < len && regex_str[j] != ']') {
-                if (cc_len < 255) {
-                    char_class[cc_len++] = regex_str[j];
-                }
-                j++;
-            }
-            if (j >= len) {
-                // no closing ']', just break
-                break;
-            }
-            char_class[cc_len] = '\0';
-            if (cc_len > 0) {
-                int pick = rand() % cc_len;
-                result[ri++] = char_class[pick];
-            }
-            i = j;
-        } else if (c == '(') {
-            /*
-             * auto_fix_regex changed unmatched '(' to '_', so hopefully we have a matching ')'
-             * or a literal '_' instead of '('. We'll do the naive skip again.
-             */
-            int depth = 1;
-            size_t j = i + 1;
-            while (j < len && depth > 0) {
-                if (regex_str[j] == '(') depth++;
-                else if (regex_str[j] == ')') depth--;
-                j++;
-            }
-            if (depth == 0) {
-                i = j - 1;
-            } else {
-                // unmatched
-                break;
-            }
-        } else if (c == '+' || c == '*') {
-            if (ri > 0) {
-                char last_char = result[ri - 1];
-                int repeat = rand() % 5;
-                for (int k = 0; k < repeat; k++) {
-                    if (ri + 2 >= capacity) {
-                        capacity *= 2;
-                        char *temp = realloc(result, capacity);
-                        if (!temp) {
-                            free(result);
-                            return NULL;
+            bool wrote_char = false;
+            char outc = '\0';
+
+            switch (nxt) {
+                case '.':
+                    /* \. => literal dot */
+                    outc = '.';
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+                case 'd':
+                    /* \d => random digit */
+                    outc = pick_random_digit();
+                    i++;
+                    cat = CAT_DIGIT;
+                    break;
+                case 'w':
+                    /* \w => random wchar [A-Za-z0-9_] */
+                    outc = pick_random_wchar();
+                    i++;
+                    cat = CAT_WCHAR;
+                    break;
+                case 'r':
+                    /* \r => 0x0D */
+                    outc = '\r';
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+                case 'n':
+                    /* \n => 0x0A */
+                    outc = '\n';
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+                case 't':
+                    /* \t => 0x09 */
+                    outc = '\t';
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+                case '0':
+                    /* \0 => 0x00 */
+                    outc = '\0';
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+                case 'x':
+                    /* \xNN => parse two hex digits */
+                    if (i + 3 < len) {
+                        char hx[3];
+                        hx[0] = regex_str[i + 2];
+                        hx[1] = regex_str[i + 3];
+                        hx[2] = '\0';
+
+                        unsigned int val;
+                        if (sscanf(hx, "%x", &val) == 1) {
+                            outc = (char)val;
+                            i += 3;
+                            cat = CAT_LITERAL;
+                            wrote_char = true;
                         }
-                        result = temp;
                     }
-                    result[ri++] = last_char;
+                    if (!wrote_char) {
+                        /* if invalid or incomplete, output literal 'x' */
+                        outc = 'x';
+                        i++;
+                        cat = CAT_LITERAL;
+                    }
+                    break;
+                default:
+                    /* \something => literal next char */
+                    outc = nxt;
+                    i++;
+                    cat = CAT_LITERAL;
+                    break;
+            }
+
+            if (!wrote_char) {
+                /* possibly we haven't assigned outc yet */
+                if (outc == '\0' && cat == CAT_LITERAL) {
+                    /* means we wrote a real 0x00, keep going */
+                }
+                if (outc != '\0' || cat != CAT_LITERAL) {
+                    /* we have a normal ASCII outc or 0x00 from above */
                 }
             }
-        } else if (c == '.') {
-            // any printable ASCII character
-            int rnd = 33 + (rand() % (126 - 33 + 1));
-            result[ri++] = (char)rnd;
-        } else {
+
+            /* Avoid consecutive identical chars: re-pick if needed and possible */
+            if (outc && outc == last_char && cat != CAT_LITERAL && outc != '\0') {
+                /* If it's a random category, try to re-pick once or twice */
+                if (cat == CAT_DIGIT || cat == CAT_WCHAR || cat == CAT_PRINTABLE) {
+                    char newc = pick_from_category(cat, NULL, 0, last_char);
+                    outc = newc;
+                }
+            }
+
+            result[ri++] = outc;
+            last_char = outc;
+            last_cat = cat;
+            if (cat == CAT_BRACKET) {
+                /* just in case, but we don't do bracket in backslash forms. */
+                last_bracket_len = 0;
+            } else {
+                last_bracket_len = 0;
+            }
+            continue;
+        }
+        else if (c == '[') {
+            // Collect everything until the next ']'
+            char raw_buf[256];
+            int raw_len = 0;
+            memset(raw_buf, 0, sizeof(raw_buf));
+
+            size_t j = i + 1;
+            while (j < len && regex_str[j] != ']') {
+                if (raw_len < 255) {
+                    raw_buf[raw_len++] = regex_str[j];
+                }
+                j++;
+            }
+
+            // Now we expand special sequences in raw_buf => expanded_buf
+            char expanded_buf[1024];
+            memset(expanded_buf, 0, sizeof(expanded_buf));
+            int expanded_len = expand_bracket_expression(raw_buf, raw_len,
+                                                        expanded_buf, sizeof(expanded_buf));
+            if (expanded_len < 1) {
+                // fallback if no valid expansions
+                expanded_buf[0] = '?';
+                expanded_buf[1] = '\0';
+                expanded_len = 1;
+            }
+
+            // Now pick one random character from expanded_buf
+            Category cat = CAT_BRACKET;
+            char outc = pick_random_bracket(expanded_buf, expanded_len, last_char);
+
+            // Write outc to the result
+            result[ri++] = outc;
+            last_char = outc;
+            last_cat = cat;
+
+            // Store bracket info for potential + or * expansions
+            memset(last_bracket_buf, 0, sizeof(last_bracket_buf));
+            memcpy(last_bracket_buf, expanded_buf, expanded_len);
+            last_bracket_buf[expanded_len] = '\0';
+            last_bracket_len = expanded_len;
+
+            // skip past the closing ']' if we found it
+            if (j < len) {
+                i = j;
+            }
+            continue;
+        }
+        else if (c == '+') {
+            /* produce 1..6 new chars from last_cat, each different from last_char */
+            int repeat_count = 1 + (rand() % 6);
+            for (int rc = 0; rc < repeat_count; rc++) {
+                char outc = pick_from_category(last_cat,
+                                               last_bracket_buf,
+                                               last_bracket_len,
+                                               last_char);
+                result[ri++] = outc;
+                last_char = outc;
+            }
+        }
+        else if (c == '*') {
+            /* produce 0..5 new chars from last_cat, each different from last_char */
+            int repeat_count = rand() % 6;
+            for (int rc = 0; rc < repeat_count; rc++) {
+                char outc = pick_from_category(last_cat,
+                                               last_bracket_buf,
+                                               last_bracket_len,
+                                               last_char);
+                result[ri++] = outc;
+                last_char = outc;
+            }
+        }
+        else if (c == '.') {
+            /* random printable => CAT_PRINTABLE */
+            Category cat = CAT_PRINTABLE;
+            char outc = pick_random_printable();
+            /* avoid consecutive duplicates if possible */
+            if (outc == last_char) {
+                char newc = pick_from_category(cat, NULL, 0, last_char);
+                outc = newc;
+            }
+            result[ri++] = outc;
+            last_char = outc;
+            last_cat = cat;
+            last_bracket_len = 0;
+        }
+        else {
+            /* normal literal char => CAT_LITERAL */
             result[ri++] = c;
+            last_char = c;
+            last_cat = CAT_LITERAL;
+            last_bracket_len = 0;
         }
     }
+
+    /* finalize string */
     result[ri] = '\0';
     return result;
 }

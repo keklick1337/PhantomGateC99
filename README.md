@@ -1,5 +1,7 @@
 # PhantomGate (C99)
 
+( **_C99 VERSION [current]_** | **[PYTHON VERSION](https://github.com/keklick1337/PhantomGate)** )
+
 **PhantomGate (C99)** is a minimalistic port spoofer, fully rewritten from the original Python version by the same author. It responds with fake or randomized signatures to confuse port scanners.
 
 > Created by **Vladislav Tislenko (aka keklick1337)**

@@ -33,6 +33,16 @@ Precompiled binaries (for multiple architectures) are available on the [Release 
    - `-l 0.0.0.0:8888` – listen on all interfaces, port **8888**.  
    - `-v` – enable verbose output.
 
+## Redirecting All Traffic
+
+To direct all incoming traffic for ports 1–65535 to PhantomGate’s port on **Linux**, you can use `iptables`:
+```bash
+INTERFACE="eth0"  # Replace with your network interface
+sudo iptables -t nat -A PREROUTING -i $INTERFACE -p tcp -m tcp \
+  -m multiport --dports 1:65535 -j REDIRECT --to-ports 8888
+```
+Then **PhantomGate** will effectively spoof any connection attempt on your machine.
+
 ## Signature File
 - **Raw** lines: no parentheses or square brackets; can include `\n`, `\r`, `\xNN`.
 - **Regex-like** lines: contain `(` or `[`; random expansions occur at runtime.

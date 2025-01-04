@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     build-essential make file pkg-config \
-    gcc-multilib \
+    gcc-multilib tar gzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

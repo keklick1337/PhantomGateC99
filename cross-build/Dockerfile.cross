@@ -13,7 +13,7 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
     gcc-mips-linux-gnu g++-mips-linux-gnu \
     gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
-    ca-certificates git wget \
+    ca-certificates git wget tar gzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

@@ -1,0 +1,11 @@
+Makefile
+*.o
+phantomgate
+phantomgate.*/
+cross-build/aarch64
+cross-build/armv7
+cross-build/mips
+cross-build/x86_64
+cross-build/riscv64
+cross-build/i386
+.vscode

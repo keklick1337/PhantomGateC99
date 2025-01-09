@@ -35,7 +35,7 @@
 
 #endif
 
-#define PHANTOMGATE_VERSION "0.1.3"
+#define PHANTOMGATE_VERSION "0.1.3f"
 #define DEFAULT_SIGNATURES_FILE "signatures.txt"
 #define DEFAULT_LISTEN_ADDR "127.0.0.1:8888"
 #define BUFFER_SIZE 4096
@@ -70,23 +70,28 @@ static void phantom_log(LogLevel level, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
 
-    fprintf(stdout, "%s", level_str);
-    vfprintf(stdout, fmt, args);
-    fprintf(stdout, "\n");
-
     if (g_logfile) {
         time_t t_now = time(NULL);
         struct tm tm_buf;
         localtime_r(&t_now, &tm_buf);
 
+        va_list args_copy;
+        va_copy(args_copy, args);
+
         char time_str[64];
         strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
-        
+
         fprintf(g_logfile, "%s %s", time_str, level_str);
-        vfprintf(g_logfile, fmt, args);
+        vfprintf(g_logfile, fmt, args_copy);
         fprintf(g_logfile, "\n");
         fflush(g_logfile);
+
+        va_end(args_copy);
     }
+
+    fprintf(stdout, "%s", level_str);
+    vfprintf(stdout, fmt, args);
+    fprintf(stdout, "\n");
 
     va_end(args);
 }
@@ -125,7 +130,6 @@ static void parse_arguments(int argc, char **argv,
                             ,char **log_file
                             );
 static Signature *parse_signatures(const char *file_path, int *out_count);
-static char *unescape_string(const char *s);
 static bool unescape_string_extended(const char *s, char **out_buf, size_t *out_len);
 static char *generate_payload(Signature *sig, size_t *out_len);
 static char *generate_regex_match(const char *regex_str, size_t *out_len);

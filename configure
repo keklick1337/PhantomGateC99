@@ -97,7 +97,7 @@ cat > Makefile <<EOF
 
 CC      = $CC
 CFLAGS  = $CFLAGS
-LDFLAGS = $LDFLAGS -pthread
+LDFLAGS = $LDFLAGS -Wall -Wextra -pthread
 
 all: phantomgate
 

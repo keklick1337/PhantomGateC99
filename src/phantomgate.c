@@ -27,10 +27,19 @@
 #include <sys/stat.h>
 #include <signal.h>
 
-#define PHANTOMGATE_VERSION "0.1.2"
+#ifdef __linux__
+
+#include <stdio.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+#endif
+
+#define PHANTOMGATE_VERSION "0.1.3"
 #define DEFAULT_SIGNATURES_FILE "signatures.txt"
 #define DEFAULT_LISTEN_ADDR "127.0.0.1:8888"
 #define BUFFER_SIZE 4096
+#define DEFAULT_TERM_WIDTH 80
 
 typedef enum {
     LOG_LEVEL_DEBUG = 0,
@@ -41,6 +50,8 @@ typedef enum {
 } LogLevel;
 
 static LogLevel g_log_level = LOG_LEVEL_WARNING;
+
+static FILE *g_logfile = NULL;
 
 static void phantom_log(LogLevel level, const char *fmt, ...) {
     if (level < g_log_level) {
@@ -63,6 +74,20 @@ static void phantom_log(LogLevel level, const char *fmt, ...) {
     vfprintf(stdout, fmt, args);
     fprintf(stdout, "\n");
 
+    if (g_logfile) {
+        time_t t_now = time(NULL);
+        struct tm tm_buf;
+        localtime_r(&t_now, &tm_buf);
+
+        char time_str[64];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
+        
+        fprintf(g_logfile, "%s %s", time_str, level_str);
+        vfprintf(g_logfile, fmt, args);
+        fprintf(g_logfile, "\n");
+        fflush(g_logfile);
+    }
+
     va_end(args);
 }
 
@@ -84,6 +109,7 @@ typedef struct {
     int signatures_count;
     bool debug;
     bool verbose;
+    bool report_clients;
 } ClientThreadArgs;
 
 /* ------------------ Function prototypes ------------------ */
@@ -94,7 +120,10 @@ static void parse_arguments(int argc, char **argv,
                             bool *debug,
                             bool *verbose,
                             bool *quiet,
-                            bool *version);
+                            bool *version
+                            ,bool *report_clients
+                            ,char **log_file
+                            );
 static Signature *parse_signatures(const char *file_path, int *out_count);
 static char *unescape_string(const char *s);
 static bool unescape_string_extended(const char *s, char **out_buf, size_t *out_len);
@@ -103,8 +132,15 @@ static char *generate_regex_match(const char *regex_str, size_t *out_len);
 static void *handle_client_thread(void *arg);
 static void start_server(const char *host, int port,
                          Signature *signatures, int signatures_count,
-                         bool debug, bool verbose, bool quiet);
+                         bool debug, bool verbose, bool quiet
+                         ,bool report_clients
+                         );
 static char *c99_strdup(const char *src);
+static void auto_fix_regex(char *str);
+static bool looks_like_regex(const char *line);
+static bool is_printable_byte(unsigned char b);
+static void format_signature_line(const char *data, size_t length, char *out_buf, size_t out_buf_size);
+int get_terminal_width(void);
 
 /* ------------------ Main function ------------------ */
 int main(int argc, char **argv) {
@@ -125,11 +161,23 @@ int main(int argc, char **argv) {
     bool quiet = false;
     bool show_version = false;
 
-    parse_arguments(argc, argv, &sign_file, &listen_str, &debug, &verbose, &quiet, &show_version);
+    bool report_clients = false;
+    char *log_file = NULL;
+
+    parse_arguments(argc, argv,
+                    &sign_file, &listen_str,
+                    &debug, &verbose, &quiet, &show_version
+                    ,&report_clients
+                    ,&log_file
+                    );
 
     if (show_version) {
         printf("PhantomGate version %s\n", PHANTOMGATE_VERSION);
         return 0;
+    }
+
+    if (report_clients) {
+        debug = true;
     }
 
     if (debug) {
@@ -142,10 +190,20 @@ int main(int argc, char **argv) {
         g_log_level = LOG_LEVEL_WARNING;
     }
 
+    if (log_file) {
+        g_logfile = fopen(log_file, "a");
+        if (!g_logfile) {
+            phantom_log(LOG_LEVEL_ERROR, "Cannot open logfile '%s': %s", log_file, strerror(errno));
+        } else {
+            phantom_log(LOG_LEVEL_INFO, "Logging to '%s'", log_file);
+        }
+    }
+
     int signatures_count = 0;
     Signature *signatures = parse_signatures(sign_file, &signatures_count);
     if (!signatures || signatures_count == 0) {
         phantom_log(LOG_LEVEL_ERROR, "No valid signatures found. Exiting.");
+        if (g_logfile) fclose(g_logfile);
         return 1;
     }
 
@@ -154,6 +212,7 @@ int main(int argc, char **argv) {
     if (!sep) {
         phantom_log(LOG_LEVEL_ERROR, "Listen address must be in format 'host:port'.");
         free(signatures);
+        if (g_logfile) fclose(g_logfile);
         return 1;
     }
 
@@ -164,16 +223,22 @@ int main(int argc, char **argv) {
     if (port <= 0 || port > 65535) {
         phantom_log(LOG_LEVEL_ERROR, "Invalid port number: %s", port_str);
         free(signatures);
+        if (g_logfile) fclose(g_logfile);
         return 1;
     }
 
-    start_server(host, port, signatures, signatures_count, debug, verbose, quiet);
+    start_server(host, port, signatures, signatures_count, debug, verbose, quiet, report_clients);
 
     /* Cleanup */
     for (int i = 0; i < signatures_count; i++) {
         free(signatures[i].data);
     }
     free(signatures);
+
+    if (g_logfile) {
+        fclose(g_logfile);
+        g_logfile = NULL;
+    }
 
     return 0;
 }
@@ -190,6 +255,8 @@ static void print_usage(const char *progname) {
     printf("  -v, --verbose              Enable verbose output.\n");
     printf("  -q, --quiet                Only show error messages.\n");
     printf("  -V, --version              Show version and exit.\n");
+    printf("  -r, --report-clients       Show which signature was sent (enables debug).\n");
+    printf("  -f, --logfile <file>       Append logs to file with timestamps.\n");
     printf("\n  PhantomGate version %s\n", PHANTOMGATE_VERSION);
 }
 
@@ -199,7 +266,10 @@ static void parse_arguments(int argc, char **argv,
                             bool *debug,
                             bool *verbose,
                             bool *quiet,
-                            bool *version)
+                            bool *version
+                            ,bool *report_clients
+                            ,char **log_file
+                            )
 {
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--signatures") == 0) && i + 1 < argc) {
@@ -214,7 +284,13 @@ static void parse_arguments(int argc, char **argv,
             *quiet = true;
         } else if (strcmp(argv[i], "-V") == 0 || strcmp(argv[i], "--version") == 0) {
             *version = true;
-        } else {
+        }
+        else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--report-clients") == 0) {
+            *report_clients = true;
+        } else if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--logfile") == 0) && i + 1 < argc) {
+            *log_file = argv[++i];
+        }
+        else {
             phantom_log(LOG_LEVEL_INFO, "Unknown argument: %s", argv[i]);
             print_usage(argv[0]);
             exit(0);
@@ -990,6 +1066,71 @@ char *generate_regex_match(const char *regex_str, size_t *out_len)
     return result;
 }
 
+#ifdef __linux__ 
+
+int get_terminal_width(void)
+{
+    struct winsize ws;
+    // If ioctl succeeds, return ws_col. Otherwise, return DEFAULT_TERM_WIDTH.
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+        return ws.ws_col;
+    }
+    return DEFAULT_TERM_WIDTH;
+}
+
+#else 
+
+int get_terminal_width(void)
+{
+    return DEFAULT_TERM_WIDTH;
+}
+
+#endif
+
+static bool is_printable_byte(unsigned char b)
+{
+    if (b >= 32 && b <= 126) return true;   // standard ASCII
+    if (b == 9 || b == 10 || b == 13) return true; // tab, newline, CR
+    return false;
+}
+
+static void format_signature_line(const char *data, size_t length, char *out_buf, size_t out_buf_size)
+{
+    // Converts non-printable bytes to \xNN,
+    // but specifically turns 0x0D (CR) -> "\r" and 0x0A (LF) -> "\n"
+    // rather than real line breaks.
+    if (!data || !out_buf || out_buf_size < 2) {
+        return;
+    }
+    size_t wi = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char b = (unsigned char)data[i];
+        if (wi + 5 >= out_buf_size) {
+            break;
+        }
+
+        if (b == '\r') {
+            if (wi + 3 < out_buf_size) {
+                out_buf[wi++] = '\\';
+                out_buf[wi++] = 'r';
+            }
+        } else if (b == '\n') {
+            if (wi + 3 < out_buf_size) {
+                out_buf[wi++] = '\\';
+                out_buf[wi++] = 'n';
+            }
+        } else if (is_printable_byte(b)) {
+            out_buf[wi++] = (char)b; 
+        } else {
+            if (wi + 4 < out_buf_size) {
+                sprintf(&out_buf[wi], "\\x%02X", b);
+                wi += 4;
+            }
+        }
+    }
+    out_buf[wi] = '\0';
+}
+
 /*
  * handle_client_thread: if the payload is invalid (NULL or empty),
  * we try a different signature instead of crashing. 
@@ -1000,6 +1141,7 @@ static void *handle_client_thread(void *arg) {
     struct sockaddr_in addr = targs->client_addr;
     bool debug = targs->debug;
     bool verbose = targs->verbose;
+    bool report_clients = targs->report_clients;
 
     // We might try a few times in case of repeated invalid signatures
     // (max 5 attempts).
@@ -1008,9 +1150,11 @@ static void *handle_client_thread(void *arg) {
     size_t payload_len = 0;
     int idx = -1;
 
+    Signature *chosen = NULL;
+
     while (attempts--) {
         idx = rand() % targs->signatures_count;
-        Signature *chosen = &targs->signatures[idx];
+        chosen = &targs->signatures[idx];
 
         /* Now we generate the payload plus length. */
         payload = generate_payload(chosen, &payload_len);
@@ -1037,7 +1181,7 @@ static void *handle_client_thread(void *arg) {
     /* Attempt to send all payload_len bytes (including any \0). */
     ssize_t sent = send(fd, payload, payload_len, MSG_NOSIGNAL);
     if (sent >= 0) {
-        if (debug) {
+        if (debug && !report_clients) {
             phantom_log(LOG_LEVEL_DEBUG,
                         "Sent payload (%zd bytes) to %s:%d [sig:%d]",
                         sent, inet_ntoa(addr.sin_addr), ntohs(addr.sin_port), idx);
@@ -1046,6 +1190,25 @@ static void *handle_client_thread(void *arg) {
                         "Sent payload to %s:%d",
                         inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
         }
+
+        if (report_clients) {
+            int term_width = get_terminal_width();
+
+            char tmpbuf[term_width];
+
+            memset(tmpbuf, 0, sizeof(tmpbuf));
+            format_signature_line(chosen->data, chosen->length, tmpbuf, sizeof(tmpbuf));
+
+            if ((int)strlen(tmpbuf) > term_width) {
+                tmpbuf[term_width] = '\0';
+            }
+
+            phantom_log(LOG_LEVEL_DEBUG,
+                        "Client %s:%d got signature index %d: %s",
+                        inet_ntoa(addr.sin_addr), ntohs(addr.sin_port),
+                        idx, tmpbuf);
+        }
+
     } else {
         if (debug) {
             phantom_log(LOG_LEVEL_DEBUG,
@@ -1065,7 +1228,9 @@ static void *handle_client_thread(void *arg) {
  */
 static void start_server(const char *host, int port,
                          Signature *signatures, int signatures_count,
-                         bool debug, bool verbose, bool quiet)
+                         bool debug, bool verbose, bool quiet
+                         ,bool report_clients
+                         )
 {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -1143,6 +1308,7 @@ static void start_server(const char *host, int port,
         args->signatures_count = signatures_count;
         args->debug = debug;
         args->verbose = verbose;
+        args->report_clients = report_clients;
 
         if (pthread_create(&tid, NULL, handle_client_thread, args) != 0) {
             phantom_log(LOG_LEVEL_ERROR, "Could not create thread: %s", strerror(errno));

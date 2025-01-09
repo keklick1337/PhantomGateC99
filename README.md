@@ -11,6 +11,8 @@
 - Simple configuration via command-line flags (`--debug`, `--quiet`, etc.).
 - Signature file supports both raw and regex-like lines.
 - Basic randomization of responses.
+- **Optional logging to file** (`--logfile` or `-f`) with timestamps.
+- **Client reporting** (`--report-clients` or `-r`) to show which signature was sent to each client.
 
 ## Download
 Precompiled binaries (for multiple architectures) are available on the [Release Page](https://github.com/keklick1337/PhantomGateC99/releases).
@@ -31,9 +33,23 @@ Precompiled binaries (for multiple architectures) are available on the [Release 
    ```bash
    ./phantomgate -s signatures.txt -l 0.0.0.0:8888 -v
    ```
-   - `-s signatures.txt` – specify the signature file.  
-   - `-l 0.0.0.0:8888` – listen on all interfaces, port **8888**.  
-   - `-v` – enable verbose output.
+   - `-s, --signatures` – specify the signature file (default: `signatures.txt`).  
+   - `-l, --listen` – listen on a given host:port (default: `127.0.0.1:8888`).  
+   - `-d, --debug` – enable debug output (shows debug logs).  
+   - `-v, --verbose` – enable verbose output (info-level logs).  
+   - `-q, --quiet` – only show error messages.  
+   - `-r, --report-clients` – show which signature was sent to each client (includes debug info).  
+   - `-f, --logfile` – path to a logfile for saving all logs with timestamps.  
+   - `-V, --version` – show version and exit.
+
+Example usage with new arguments:
+```bash
+./phantomgate -s signatures.txt \
+              -l 0.0.0.0:8888 \
+              -r \
+              -f myphantom.log
+```
+Here, PhantomGate listens on **all interfaces**, **port 8888**, logs to the file **myphantom.log**, and prints which signature was sent to each client.
 
 ## Redirecting All Traffic
 
@@ -53,3 +69,4 @@ For more examples you can check [Iptables Examples](examples)
 ## Other Info
 - For the Python version, see [this link](https://github.com/keklick1337/PhantomGate).  
 - Author of both the original and this C99 rewrite: **keklick1337**.
+- Licensed under MIT.

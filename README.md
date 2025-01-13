@@ -1,5 +1,5 @@
 # PhantomGate (C99)
-
+![c99 version](https://img.shields.io/badge/Pure-C99-green?logo=c)
 ( **_C99 VERSION [current]_** | **[PYTHON VERSION](https://github.com/keklick1337/PhantomGate)** )
 
 **PhantomGate (C99)** is a minimalistic port spoofer, fully rewritten from the original Python version by the same author. It responds with fake or randomized signatures to confuse port scanners.
@@ -15,7 +15,18 @@
 - **Client reporting** (`--report-clients` or `-r`) to show which signature was sent to each client.
 
 ## Download
-Precompiled binaries (for multiple architectures) are available on the [Release Page](https://github.com/keklick1337/PhantomGateC99/releases).
+Precompiled binaries (for multiple architectures) are available on the [Release Page](https://github.com/keklick1337/PhantomGateC99/releases).  
+Also, see documentation here:  
+[![DOC Reference](https://img.shields.io/badge/DOC-Reference-blue)](DOC.md)
+
+| Platform   | Download                                                                                                                        |
+|------------|---------------------------------------------------------------------------------------------------------------------------------|
+| Linux **x86_64**  | [![Download x86_64](https://img.shields.io/badge/x86__64-Latest-blueviolet?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_x86_64.tar.gz)     |
+| Linux **aarch64** | [![Download aarch64](https://img.shields.io/badge/aarch64-Latest-brightgreen?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_aarch64.tar.gz) |
+| Linux **armv7**   | [![Download armv7](https://img.shields.io/badge/armv7-Latest-blue?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_armv7.tar.gz)               |
+| Linux **mips**    | [![Download mips](https://img.shields.io/badge/mips-Latest-red?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_mips.tar.gz)                   |
+| Linux **riscv64** | [![Download riscv64](https://img.shields.io/badge/riscv64-Latest-yellow?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_riscv64.tar.gz)       |
+| Linux **i386**    | [![Download i386](https://img.shields.io/badge/i386-Latest-orange?logo=github)](https://github.com/keklick1337/PhantomGateC99/releases/latest/download/phantomgate_i386.tar.gz)               |
 
 ## Quick Start
 

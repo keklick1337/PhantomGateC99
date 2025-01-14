@@ -16,8 +16,6 @@
 
 ## Download
 Precompiled binaries (for multiple architectures) are available on the [Release Page](https://github.com/keklick1337/PhantomGateC99/releases).  
-Also, see documentation here:  
-[![DOC Reference](https://img.shields.io/badge/DOC-Reference-blue)](DOC.md)
 
 | Platform   | Download                                                                                                                        |
 |------------|---------------------------------------------------------------------------------------------------------------------------------|
